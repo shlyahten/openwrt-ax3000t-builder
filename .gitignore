@@ -1,0 +1,6 @@
+# Image Builder temp files and downloaded archives
+builder/
+output/
+*.tar.zst
+*.tar.xz
+sha256sums*
