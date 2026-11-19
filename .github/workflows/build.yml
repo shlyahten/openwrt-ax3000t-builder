@@ -1,0 +1,282 @@
+name: Build OpenWrt for Xiaomi AX3000T
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'OpenWrt Release Version'
+        required: true
+        default: '25.12.5'
+        type: string
+      target:
+        description: 'Target Architecture'
+        required: true
+        default: 'mediatek/filogic'
+        type: string
+      profile:
+        description: 'Device Profile'
+        required: true
+        default: 'xiaomi_mi-router-ax3000t'
+        type: string
+      packages:
+        description: 'Custom packages to include in the image'
+        required: false
+        default: 'luci luci-ssl luci-app-firewall ca-bundle curl tcpdump sqlite3-cli sing-box kmod-amneziawg amneziawg-tools luci-proto-amneziawg podkop luci-app-podkop luci-i18n-podkop-ru'
+        type: string
+      create_release:
+        description: 'Publish GitHub Release with firmware'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build OpenWrt Firmware
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libncurses5-dev \
+            libncursesw5-dev \
+            zlib1g-dev \
+            gawk \
+            git \
+            gettext \
+            libssl-dev \
+            xsltproc \
+            rsync \
+            wget \
+            curl \
+            unzip \
+            python3 \
+            file \
+            tar \
+            zstd \
+            jq
+
+      - name: Download & Extract OpenWrt Image Builder
+        run: |
+          RELEASE="${{ inputs.release }}"
+          TARGET="${{ inputs.target }}"
+          BASE_URL="https://downloads.openwrt.org/releases/${RELEASE}/targets/${TARGET}"
+
+          echo "Fetching checksums from ${BASE_URL}/sha256sums"
+          curl -fsSL "${BASE_URL}/sha256sums" -o sha256sums
+
+          IB_ARCHIVE=$(awk '/openwrt-imagebuilder.*Linux-x86_64\.tar\.(zst|xz)/ {print $2}' sha256sums | sed 's/^\*//' | head -n 1)
+          if [ -z "$IB_ARCHIVE" ]; then
+            IB_ARCHIVE=$(grep -oE "openwrt-imagebuilder-[0-9A-Za-z._-]+Linux-x86_64\.tar\.(zst|xz)" sha256sums | head -n 1)
+          fi
+
+          if [ -z "$IB_ARCHIVE" ]; then
+            echo "::error::Could not find Image Builder archive in sha256sums for release ${RELEASE} and target ${TARGET}"
+            exit 1
+          fi
+
+          echo "Found Image Builder archive: ${IB_ARCHIVE}"
+          curl -fsSL "${BASE_URL}/${IB_ARCHIVE}" -o "${IB_ARCHIVE}"
+
+          echo "Verifying checksum..."
+          grep "${IB_ARCHIVE}" sha256sums | sha256sum -c -
+
+          mkdir -p builder
+          echo "Extracting ${IB_ARCHIVE}..."
+          tar -xaf "${IB_ARCHIVE}" -C builder --strip-components=1
+          echo "Image Builder extracted successfully."
+
+      - name: Configure AmneziaWG Feeds and Signing Keys
+        run: |
+          RELEASE="${{ inputs.release }}"
+          TARGET="${{ inputs.target }}"
+
+          echo "Configuring AmneziaWG signing keys..."
+          mkdir -p builder/keys
+          mkdir -p builder/files/etc/apk/keys
+          mkdir -p builder/files/etc/opkg/keys
+
+          # Download public signing keys for both apk (pem) and opkg (pub)
+          curl -fsSL "https://2grey.github.io/awg-openwrt/keys/awg-openwrt-feed.pem" -o "builder/keys/awg-openwrt-feed.pem" || true
+          curl -fsSL "https://2grey.github.io/awg-openwrt/keys/awg-openwrt-feed.pub" -o "builder/keys/awg-openwrt-feed.pub" || true
+
+          # Provide keys in root directory (ImageBuilder default --keys-dir)
+          cp -f builder/keys/* builder/ 2>/dev/null || true
+
+          # Also put key into system /etc/apk/keys if apk is used on runner
+          sudo mkdir -p /etc/apk/keys
+          sudo cp -f builder/keys/* /etc/apk/keys/ 2>/dev/null || true
+
+          # Embed keys into the built router firmware rootfs so subsequent apk/opkg updates work seamlessly
+          cp -f builder/keys/*.pem builder/files/etc/apk/keys/ 2>/dev/null || true
+          cp -f builder/keys/*.pub builder/files/etc/opkg/keys/ 2>/dev/null || true
+
+          # Configure feeds according to package manager used by the Image Builder
+          if [ -f builder/repositories ]; then
+            echo "Detected APK Image Builder (OpenWrt 25+). Adding 2Grey AmneziaWG feed to repositories..."
+            AWG_APK_FEED="https://2grey.github.io/awg-openwrt/${RELEASE}/${TARGET}/packages.adb"
+            if ! grep -qF "${AWG_APK_FEED}" builder/repositories; then
+              echo "${AWG_APK_FEED}" >> builder/repositories
+            fi
+            echo "Current builder/repositories:"
+            cat builder/repositories
+
+            # Persist repository inside the flashed router filesystem
+            mkdir -p builder/files/etc/apk/repositories.d
+            echo "${AWG_APK_FEED}" > builder/files/etc/apk/repositories.d/amneziawg.list
+          fi
+
+          if [ -f builder/repositories.conf ]; then
+            echo "Detected OPKG Image Builder (OpenWrt 24 and older). Adding 2Grey AmneziaWG feed to repositories.conf..."
+            AWG_OPKG_FEED="src/gz awg https://2grey.github.io/awg-openwrt/${RELEASE}/${TARGET}"
+            if ! grep -qF "https://2grey.github.io/awg-openwrt" builder/repositories.conf; then
+              echo "${AWG_OPKG_FEED}" >> builder/repositories.conf
+            fi
+            echo "Current builder/repositories.conf:"
+            cat builder/repositories.conf
+
+            # Persist custom feed inside the flashed router filesystem
+            mkdir -p builder/files/etc/opkg
+            echo "${AWG_OPKG_FEED}" >> builder/files/etc/opkg/customfeeds.conf
+          fi
+
+      - name: Download Podkop Packages & Generate Package Index
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p builder/packages
+
+          # Detect whether the Image Builder expects APK or IPK
+          if [ -f builder/repositories ]; then
+            PKG_EXT="apk"
+          else
+            PKG_EXT="ipk"
+          fi
+          echo "Image Builder package format: ${PKG_EXT}"
+
+          echo "Fetching latest Podkop release assets from GitHub API..."
+          PODKOP_API="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
+          RELEASE_JSON=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "User-Agent: OpenWrt-Builder" "$PODKOP_API" 2>/dev/null || curl -fsSL "$PODKOP_API")
+
+          echo "$RELEASE_JSON" | jq -r --arg ext "$PKG_EXT" '.assets[] | select(.name | test("podkop.*\\." + $ext + "$")) | .browser_download_url' | while read -r url; do
+            [ -n "$url" ] || continue
+            filename=$(basename "$url")
+            echo "Downloading $filename..."
+            curl -fsSL "$url" -o "builder/packages/$filename"
+          done
+
+          echo "Downloaded packages in builder/packages:"
+          ls -la builder/packages/
+
+          # Index local packages based on package manager type
+          if [ "$PKG_EXT" = "apk" ]; then
+            echo "Indexing APK packages for OpenWrt 25..."
+            APK_BIN=""
+            if [ -x "builder/staging_dir/host/bin/apk" ]; then
+              APK_BIN="builder/staging_dir/host/bin/apk"
+            elif command -v apk >/dev/null 2>&1; then
+              APK_BIN="apk"
+            fi
+
+            if [ -n "$APK_BIN" ] && ls builder/packages/*.apk >/dev/null 2>&1; then
+              echo "Generating builder/packages/packages.adb using $APK_BIN..."
+              $APK_BIN mkndx --allow-untrusted --output builder/packages/packages.adb builder/packages/*.apk
+              ls -la builder/packages/packages.adb
+            fi
+          else
+            echo "Indexing OPKG packages for OpenWrt 24..."
+            make -C builder package_index || true
+          fi
+
+      - name: Build Firmware Image
+        run: |
+          cd builder
+
+          # Merge user-provided files/ directory from repository root if present
+          if [ -d "../files" ]; then
+            echo "Found custom files/ directory in repository root. Merging..."
+            mkdir -p files
+            cp -r ../files/* files/ 2>/dev/null || true
+          fi
+
+          BUILD_ARGS="PROFILE=${{ inputs.profile }} PACKAGES=\"${{ inputs.packages }}\""
+
+          # Include files overlay if directory contains files
+          if [ -d "files" ] && [ -n "$(ls -A files 2>/dev/null)" ]; then
+            echo "Bundling files overlay into firmware image..."
+            BUILD_ARGS="$BUILD_ARGS FILES=files"
+          fi
+
+          echo "Running: make image $BUILD_ARGS"
+          eval make image $BUILD_ARGS
+
+      - name: Prepare Artifacts
+        run: |
+          mkdir -p output
+          PROFILE="${{ inputs.profile }}"
+
+          echo "Searching for generated firmware images..."
+          find builder/bin/targets/ -type f -name "*${PROFILE}*sysupgrade.bin" -exec cp -v {} output/ \;
+          find builder/bin/targets/ -type f -name "*${PROFILE}*initramfs*.bin" -exec cp -v {} output/ \; 2>/dev/null || true
+
+          if [ -z "$(ls -A output)" ]; then
+            echo "::error::No matching firmware binary found in builder/bin/targets/!"
+            exit 1
+          fi
+
+          cd output
+          echo "Generating SHA256 checksums..."
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ inputs.release }}-${{ inputs.profile }}
+          path: output/*
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_release }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="v${{ inputs.release }}-$(date +'%Y%m%d-%H%M')"
+          RELEASE_TITLE="OpenWrt ${{ inputs.release }} for AX3000T ($(date +'%Y-%m-%d'))"
+
+          cat << 'EOF' > release_notes.md
+          ### OpenWrt Firmware for Xiaomi Mi Router AX3000T
+
+          - **OpenWrt Release:** ${{ inputs.release }}
+          - **Architecture / Target:** `${{ inputs.target }}`
+          - **Device Profile:** `${{ inputs.profile }}`
+          - **Included Packages:**
+            - `kmod-amneziawg`, `amneziawg-tools`, `luci-proto-amneziawg` (AmneziaWG 3.x with DPI obfuscation)
+            - `podkop`, `luci-app-podkop`, `luci-i18n-podkop-ru` (Selective policy-based routing)
+            - `sing-box`, `luci`, `luci-ssl`, `luci-app-firewall`, `ca-bundle`, `tcpdump`, `sqlite3-cli`, `curl`
+
+          #### Installation / Upgrade:
+          1. Download the `*sysupgrade.bin` file below.
+          2. Check the SHA256 checksum against `SHA256SUMS.txt`.
+          3. In OpenWrt LuCI, go to **System** -> **Backup / Flash Firmware** -> **Flash image**.
+          EOF
+
+          echo "Creating GitHub Release $RELEASE_TAG..."
+          gh release create "$RELEASE_TAG" output/* \
+            --title "$RELEASE_TITLE" \
+            --notes-file release_notes.md
