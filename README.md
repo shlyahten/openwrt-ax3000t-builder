@@ -11,7 +11,7 @@
 - **Целевое устройство:** Xiaomi Mi Router AX3000T (RD03 / RD23)
 - **Архитектура / Target:** `mediatek/filogic` (MT7981B, aarch64_cortex-a53)
 - **Профиль Image Builder:** `xiaomi_mi-router-ax3000t`
-- **Версия OpenWrt по умолчанию:** `25.12.5` (ветка OpenWrt 25 с современным пакетным менеджером **apk** / `packages.adb`)
+- **Версия OpenWrt по умолчанию:** `25.12.6` (ветка OpenWrt 25 с современным пакетным менеджером **apk** / `packages.adb`)
 
 ### Включённые пакеты:
 - **AmneziaWG 3.x:**
@@ -37,7 +37,7 @@
 2. В левой колонке выберите воркфлоу **Build OpenWrt for Xiaomi AX3000T**.
 3. Справа нажмите кнопку **Run workflow**.
 4. Заполните (или оставьте по умолчанию) параметры:
-   - **OpenWrt Release Version:** `25.12.5` (или другая поддерживаемая версия).
+   - **OpenWrt Release Version:** `25.12.6` (или другая поддерживаемая версия).
    - **Target Architecture:** `mediatek/filogic`.
    - **Device Profile:** `xiaomi_mi-router-ax3000t`.
    - **Custom packages:** список пакетов (по умолчанию уже включены AmneziaWG, Podkop и sing-box).
@@ -54,7 +54,7 @@
    - Скачайте файл `*xiaomi_mi-router-ax3000t-squashfs-sysupgrade.bin` и `SHA256SUMS.txt`.
 2. **Workflow Artifacts:**
    - Откройте завершившийся запуск в разделе **Actions**.
-   - Внизу страницы в секции **Artifacts** скачайте архив `openwrt-25.12.5-xiaomi_mi-router-ax3000t.zip`.
+   - Внизу страницы в секции **Artifacts** скачайте архив `openwrt-25.12.6-xiaomi_mi-router-ax3000t.zip`.
 
 ---
 
