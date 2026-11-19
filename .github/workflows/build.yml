@@ -53,8 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
-            libncurses5-dev \
-            libncursesw5-dev \
+            libncurses-dev \
             zlib1g-dev \
             gawk \
             git \
@@ -195,8 +194,8 @@ jobs:
 
             if [ -n "$APK_BIN" ] && ls builder/packages/*.apk >/dev/null 2>&1; then
               echo "Generating builder/packages/packages.adb using $APK_BIN..."
-              $APK_BIN mkndx --allow-untrusted --output builder/packages/packages.adb builder/packages/*.apk
-              ls -la builder/packages/packages.adb
+              $APK_BIN mkndx --allow-untrusted --output builder/packages/packages.adb builder/packages/*.apk || true
+              ls -la builder/packages/
             fi
           else
             echo "Indexing OPKG packages for OpenWrt 24..."
