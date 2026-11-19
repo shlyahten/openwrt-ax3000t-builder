@@ -6,7 +6,7 @@ on:
       release:
         description: 'OpenWrt Release Version'
         required: true
-        default: '25.12.5'
+        default: '25.12.6'
         type: string
       target:
         description: 'Target Architecture'
@@ -100,28 +100,31 @@ jobs:
           tar -xaf "${IB_ARCHIVE}" -C builder --strip-components=1
           echo "Image Builder extracted successfully."
 
-      - name: Configure AmneziaWG Feeds and Signing Keys
+      - name: Configure Signing Keys and Repositories
         run: |
           RELEASE="${{ inputs.release }}"
           TARGET="${{ inputs.target }}"
 
-          echo "Configuring AmneziaWG signing keys..."
           mkdir -p builder/keys
           mkdir -p builder/files/etc/apk/keys
           mkdir -p builder/files/etc/opkg/keys
+          sudo mkdir -p /etc/apk/keys
 
-          # Download public signing keys for both apk (pem) and opkg (pub)
+          echo "Downloading AmneziaWG public signing keys..."
           curl -fsSL "https://2grey.github.io/awg-openwrt/keys/awg-openwrt-feed.pem" -o "builder/keys/awg-openwrt-feed.pem" || true
           curl -fsSL "https://2grey.github.io/awg-openwrt/keys/awg-openwrt-feed.pub" -o "builder/keys/awg-openwrt-feed.pub" || true
 
-          # Provide keys in root directory (ImageBuilder default --keys-dir)
+          echo "Generating local EC keypair (prime256v1) for custom packages (Podkop)..."
+          openssl ecparam -name prime256v1 -genkey -noout -out builder/private-key.pem
+          openssl ec -in builder/private-key.pem -pubout -out builder/public-key.pem
+
+          # Distribute public keys to all trusted key locations
+          cp -f builder/public-key.pem builder/keys/local-feed.pem
+          cp -f builder/public-key.pem builder/keys/local-feed.pub
+          cp -f builder/public-key.pem builder/
+
           cp -f builder/keys/* builder/ 2>/dev/null || true
-
-          # Also put key into system /etc/apk/keys if apk is used on runner
-          sudo mkdir -p /etc/apk/keys
           sudo cp -f builder/keys/* /etc/apk/keys/ 2>/dev/null || true
-
-          # Embed keys into the built router firmware rootfs so subsequent apk/opkg updates work seamlessly
           cp -f builder/keys/*.pem builder/files/etc/apk/keys/ 2>/dev/null || true
           cp -f builder/keys/*.pub builder/files/etc/opkg/keys/ 2>/dev/null || true
 
@@ -155,56 +158,100 @@ jobs:
           fi
 
       - name: Download Podkop Packages & Generate Package Index
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p builder/packages
+          cd builder/packages
 
           # Detect whether the Image Builder expects APK or IPK
-          if [ -f builder/repositories ]; then
+          if [ -f "../repositories" ]; then
             PKG_EXT="apk"
           else
             PKG_EXT="ipk"
           fi
-          echo "Image Builder package format: ${PKG_EXT}"
+          echo "Target package format: ${PKG_EXT}"
 
-          echo "Fetching latest Podkop release assets from GitHub API..."
-          PODKOP_API="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
-          RELEASE_JSON=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "User-Agent: OpenWrt-Builder" "$PODKOP_API" 2>/dev/null || curl -fsSL "$PODKOP_API")
+          echo "Attempting download via GitHub CLI..."
+          gh release download --repo itdoginfo/podkop \
+            --pattern "podkop*${PKG_EXT}" \
+            --pattern "luci-app-podkop*${PKG_EXT}" \
+            --dir . 2>/dev/null || true
 
-          echo "$RELEASE_JSON" | jq -r --arg ext "$PKG_EXT" '.assets[] | select(.name | test("^(podkop|luci-app-podkop).*\\." + $ext + "$")) | .browser_download_url' | while read -r url; do
-            [ -n "$url" ] || continue
-            filename=$(basename "$url")
-            echo "Downloading $filename..."
-            curl -fsSL "$url" -o "builder/packages/$filename"
-          done
+          # Fallback 1: GitHub API without scoped token
+          if [ -z "$(ls -A ./*.${PKG_EXT} 2>/dev/null)" ]; then
+            echo "Fallback: Downloading via GitHub API..."
+            PODKOP_API="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
+            RELEASE_JSON=$(curl -fsSL -H "User-Agent: OpenWrt-Builder" "$PODKOP_API" 2>/dev/null || true)
+            if [ -n "$RELEASE_JSON" ]; then
+              echo "$RELEASE_JSON" | jq -r --arg ext "$PKG_EXT" '.assets[] | select(.name | test("^(podkop|luci-app-podkop).*\\." + $ext + "$")) | .browser_download_url' | while read -r url; do
+                [ -n "$url" ] || continue
+                filename=$(basename "$url")
+                echo "Downloading $filename..."
+                curl -fsSL "$url" -o "$filename"
+              done
+            fi
+          fi
+
+          # Fallback 2: Latest release redirect URL
+          if [ -z "$(ls -A ./*.${PKG_EXT} 2>/dev/null)" ]; then
+            echo "Fallback: Querying latest release redirect URL..."
+            TAG_URL=$(curl -fsSI "https://github.com/itdoginfo/podkop/releases/latest" 2>/dev/null | grep -i "^location:" | awk '{print $2}' | tr -d '\r\n')
+            TAG=$(basename "$TAG_URL")
+            if [ -n "$TAG" ]; then
+              CLEAN_VER="${TAG#v}"
+              echo "Downloading assets for version ${CLEAN_VER} (${TAG})..."
+              if [ "$PKG_EXT" = "apk" ]; then
+                curl -fsSL "https://github.com/itdoginfo/podkop/releases/download/${TAG}/podkop-${CLEAN_VER}-r1.apk" -o "podkop-${CLEAN_VER}-r1.apk" || true
+                curl -fsSL "https://github.com/itdoginfo/podkop/releases/download/${TAG}/luci-app-podkop-${CLEAN_VER}-r1.apk" -o "luci-app-podkop-${CLEAN_VER}-r1.apk" || true
+              else
+                curl -fsSL "https://github.com/itdoginfo/podkop/releases/download/${TAG}/podkop_${CLEAN_VER}-r1_all.ipk" -o "podkop_${CLEAN_VER}-r1_all.ipk" || true
+                curl -fsSL "https://github.com/itdoginfo/podkop/releases/download/${TAG}/luci-app-podkop_${CLEAN_VER}-r1_all.ipk" -o "luci-app-podkop_${CLEAN_VER}-r1_all.ipk" || true
+              fi
+            fi
+          fi
 
           echo "Downloaded packages in builder/packages:"
-          ls -la builder/packages/
+          ls -la ./*.${PKG_EXT} || {
+            echo "::error::No Podkop packages found or downloaded!"
+            exit 1
+          }
 
-          # Index local packages based on package manager type
+          # Index packages locally
           if [ "$PKG_EXT" = "apk" ]; then
             echo "Indexing APK packages for OpenWrt 25..."
             APK_BIN=""
-            if [ -x "builder/staging_dir/host/bin/apk" ]; then
-              APK_BIN="builder/staging_dir/host/bin/apk"
+            if [ -x "../../staging_dir/host/bin/apk" ]; then
+              APK_BIN="../../staging_dir/host/bin/apk"
+            elif [ -x "../staging_dir/host/bin/apk" ]; then
+              APK_BIN="../staging_dir/host/bin/apk"
             elif command -v apk >/dev/null 2>&1; then
               APK_BIN="apk"
             fi
 
-            if [ -n "$APK_BIN" ] && ls builder/packages/*.apk >/dev/null 2>&1; then
-              echo "Generating builder/packages/packages.adb using $APK_BIN..."
-              $APK_BIN mkndx --allow-untrusted --output builder/packages/packages.adb builder/packages/*.apk || true
-              ls -la builder/packages/
+            if [ -n "$APK_BIN" ]; then
+              echo "Generating signed packages.adb using $APK_BIN..."
+              $APK_BIN mkndx --allow-untrusted --sign-key ../private-key.pem --output packages.adb *.apk 2>/dev/null || \
+              $APK_BIN mkndx --allow-untrusted --sign ../private-key.pem --output packages.adb *.apk 2>/dev/null || \
+              $APK_BIN mkndx --allow-untrusted --output packages.adb *.apk
+
+              ls -la packages.adb
+            else
+              echo "::warning::APK binary not found for indexing!"
             fi
           else
             echo "Indexing OPKG packages for OpenWrt 24..."
-            make -C builder package_index || true
+            cd ..
+            make package_index || true
           fi
 
       - name: Build Firmware Image
         run: |
           cd builder
+
+          # Ensure apk allows untrusted signatures and local indexes in Image Builder
+          echo "Patching Image Builder Makefile for apk --allow-untrusted..."
+          sed -i 's/\$(STAGING_DIR_HOST)\/bin\/apk/$(STAGING_DIR_HOST)\/bin\/apk --allow-untrusted/g' Makefile include/*.mk 2>/dev/null || true
+          sed -i 's/\bapk add\b/apk --allow-untrusted add/g' Makefile include/*.mk 2>/dev/null || true
+          sed -i 's/\bapk --root\b/apk --allow-untrusted --root/g' Makefile include/*.mk 2>/dev/null || true
 
           # Merge user-provided files/ directory from repository root if present
           if [ -d "../files" ]; then
