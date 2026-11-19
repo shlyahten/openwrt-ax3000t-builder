@@ -121,7 +121,6 @@ jobs:
           # Distribute public keys to all trusted key locations
           cp -f builder/public-key.pem builder/keys/local-feed.pem
           cp -f builder/public-key.pem builder/keys/local-feed.pub
-          cp -f builder/public-key.pem builder/
 
           cp -f builder/keys/* builder/ 2>/dev/null || true
           sudo cp -f builder/keys/* /etc/apk/keys/ 2>/dev/null || true
