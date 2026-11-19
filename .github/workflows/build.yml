@@ -21,7 +21,7 @@ on:
       packages:
         description: 'Custom packages to include in the image'
         required: false
-        default: 'luci luci-ssl luci-app-firewall ca-bundle curl tcpdump sqlite3-cli sing-box kmod-amneziawg amneziawg-tools luci-proto-amneziawg podkop luci-app-podkop luci-i18n-podkop-ru'
+        default: 'luci luci-ssl luci-app-firewall ca-bundle curl tcpdump sqlite3-cli sing-box kmod-amneziawg amneziawg-tools luci-proto-amneziawg podkop luci-app-podkop'
         type: string
       create_release:
         description: 'Publish GitHub Release with firmware'
@@ -172,7 +172,7 @@ jobs:
           PODKOP_API="https://api.github.com/repos/itdoginfo/podkop/releases/latest"
           RELEASE_JSON=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "User-Agent: OpenWrt-Builder" "$PODKOP_API" 2>/dev/null || curl -fsSL "$PODKOP_API")
 
-          echo "$RELEASE_JSON" | jq -r --arg ext "$PKG_EXT" '.assets[] | select(.name | test("podkop.*\\." + $ext + "$")) | .browser_download_url' | while read -r url; do
+          echo "$RELEASE_JSON" | jq -r --arg ext "$PKG_EXT" '.assets[] | select(.name | test("^(podkop|luci-app-podkop).*\\." + $ext + "$")) | .browser_download_url' | while read -r url; do
             [ -n "$url" ] || continue
             filename=$(basename "$url")
             echo "Downloading $filename..."
@@ -266,7 +266,7 @@ jobs:
           - **Device Profile:** `${{ inputs.profile }}`
           - **Included Packages:**
             - `kmod-amneziawg`, `amneziawg-tools`, `luci-proto-amneziawg` (AmneziaWG 3.x with DPI obfuscation)
-            - `podkop`, `luci-app-podkop`, `luci-i18n-podkop-ru` (Selective policy-based routing)
+            - `podkop`, `luci-app-podkop` (Selective policy-based routing)
             - `sing-box`, `luci`, `luci-ssl`, `luci-app-firewall`, `ca-bundle`, `tcpdump`, `sqlite3-cli`, `curl`
 
           #### Installation / Upgrade:
